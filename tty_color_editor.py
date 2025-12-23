@@ -87,9 +87,28 @@ def apply_color(index, hex_color):
 def get_fonts():
     font_dir = "/usr/share/consolefonts"
     if not os.path.exists(font_dir):
-        return []
-    fonts = [f for f in os.listdir(font_dir) if f.endswith(".psf.gz") or f.endswith(".psf")]
-    return sorted(fonts)
+        return {}
+    
+    # Structure: { family: { size: { bold: filename, normal: filename } } }
+    parsed = {}
+    
+    pattern = re.compile(r"Lat15-([a-zA-Z]+)(Bold)?([0-9x]+)\.psf\.gz")
+    
+    for f in os.listdir(font_dir):
+        match = pattern.match(f)
+        if match:
+            family, bold_tag, size = match.groups()
+            is_bold = bold_tag is not None
+            
+            if family not in parsed:
+                parsed[family] = {}
+            if size not in parsed[family]:
+                parsed[family][size] = {}
+            
+            key = 'bold' if is_bold else 'normal'
+            parsed[family][size][key] = f
+            
+    return parsed
 
 def apply_font(font_name):
     try:
@@ -138,8 +157,12 @@ class ColorEditor:
         self.preset_idx = 0
 
         # Font vars
-        self.fonts = get_fonts()
-        self.font_idx = 0
+        self.font_data = get_fonts()
+        self.families = sorted(list(self.font_data.keys()))
+        self.font_family_idx = 0
+        self.font_size_idx = 0
+        self.font_bold = False
+        self.font_edit_field = 0 # 0: Family, 1: Size, 2: Bold
         self.current_font = "Default"
 
         # Cursor vars
@@ -184,11 +207,21 @@ class ColorEditor:
 
             elif self.state == 'FONTS':
                 if key == 27: self.state = 'LIST'; self.reset_msg()
-                elif key == curses.KEY_UP: self.font_idx = (self.font_idx - 1) % len(self.fonts)
-                elif key == curses.KEY_DOWN: self.font_idx = (self.font_idx + 1) % len(self.fonts)
-                elif key in [ord('\n'), curses.KEY_ENTER]: 
-                    self.current_font = self.fonts[self.font_idx]
-                    apply_font(self.current_font)
+                elif key == curses.KEY_UP: self.font_edit_field = (self.font_edit_field - 1) % 3
+                elif key == curses.KEY_DOWN: self.font_edit_field = (self.font_edit_field + 1) % 3
+                elif key in [curses.KEY_LEFT, curses.KEY_RIGHT]:
+                    delta = 1 if key == curses.KEY_RIGHT else -1
+                    if self.font_edit_field == 0:
+                        self.font_family_idx = (self.font_family_idx + delta) % len(self.families)
+                        self.font_size_idx = 0 # Reset size when family changes
+                    elif self.font_edit_field == 1:
+                        family = self.families[self.font_family_idx]
+                        sizes = sorted(list(self.font_data[family].keys()))
+                        self.font_size_idx = (self.font_size_idx + delta) % len(sizes)
+                    elif self.font_edit_field == 2:
+                        self.font_bold = not self.font_bold
+                elif key in [ord('\n'), curses.KEY_ENTER]:
+                    self.apply_structured_font()
                     self.state = 'LIST'; self.reset_msg()
 
             elif self.state == 'CURSOR':
@@ -238,6 +271,27 @@ class ColorEditor:
                 self.colors[i] = scale_color(self.base_colors[i], self.brightness)
                 apply_color(i, self.colors[i])
             self.message = f"Applied preset: {name}"
+
+    def apply_structured_font(self):
+        if not self.families: return
+        family = self.families[self.font_family_idx]
+        sizes = sorted(list(self.font_data[family].keys()))
+        size = sizes[self.font_size_idx]
+        
+        # Determine best filename
+        options = self.font_data[family][size]
+        filename = None
+        if self.font_bold and 'bold' in options:
+            filename = options['bold']
+        elif 'normal' in options:
+            filename = options['normal']
+        elif 'bold' in options:
+            filename = options['bold']
+            
+        if filename:
+            self.current_font = filename
+            apply_font(filename)
+            self.message = f"Applied font: {filename}"
 
     def draw_bar(self, y, x, value, label, is_selected):
         filled_len = int((value / 255.0) * 20)
@@ -292,15 +346,30 @@ class ColorEditor:
                  self.stdscr.addstr(detail_y + 2 + idx, detail_x, f"{prefix}{name}", attr)
 
         elif self.state == 'FONTS':
-            self.stdscr.addstr(detail_y, detail_x, "SELECT FONT", curses.A_UNDERLINE)
-            visible_fonts = 10
-            start_f = max(0, self.font_idx - visible_fonts // 2)
-            end_f = min(len(self.fonts), start_f + visible_fonts)
-            for i in range(start_f, end_f):
-                idx = i - start_f
-                prefix = "> " if i == self.font_idx else "  "
-                attr = curses.A_REVERSE if i == self.font_idx else curses.A_NORMAL
-                self.stdscr.addstr(detail_y + 2 + idx, detail_x, f"{prefix}{self.fonts[i][:30]}", attr)
+            self.stdscr.addstr(detail_y, detail_x, "FONT SETTINGS (Latin)", curses.A_UNDERLINE)
+            if not self.families:
+                self.stdscr.addstr(detail_y + 2, detail_x, "No Latin fonts found.")
+            else:
+                family = self.families[self.font_family_idx]
+                sizes = sorted(list(self.font_data[family].keys()))
+                size = sizes[self.font_size_idx]
+                
+                # Family
+                prefix = "> " if self.font_edit_field == 0 else "  "
+                attr = curses.A_BOLD if self.font_edit_field == 0 else curses.A_NORMAL
+                self.stdscr.addstr(detail_y + 2, detail_x, f"{prefix}Type: < {family} >", attr)
+                
+                # Size
+                prefix = "> " if self.font_edit_field == 1 else "  "
+                attr = curses.A_BOLD if self.font_edit_field == 1 else curses.A_NORMAL
+                self.stdscr.addstr(detail_y + 4, detail_x, f"{prefix}Size: < {size} >", attr)
+                
+                # Bold
+                prefix = "> " if self.font_edit_field == 2 else "  "
+                attr = curses.A_BOLD if self.font_edit_field == 2 else curses.A_NORMAL
+                has_bold = 'bold' in self.font_data[family][size]
+                bold_status = ("ON" if self.font_bold else "OFF") if has_bold else "N/A"
+                self.stdscr.addstr(detail_y + 6, detail_x, f"{prefix}Bold: < {bold_status} >", attr)
 
         elif self.state == 'CURSOR':
             self.stdscr.addstr(detail_y, detail_x, "CURSOR SETTINGS", curses.A_UNDERLINE)
